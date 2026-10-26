@@ -1,0 +1,46 @@
+paths:
+  data_dir: data/sample
+  cache_dir: data/cache
+  reports_dir: reports
+chunking:
+  chunk_size: 512
+  chunk_overlap: 64
+embedding:
+  model_name: BAAI/bge-m3
+  model_path: models/bge-m3
+  max_length: 1024
+  batch_size: 16
+  use_fp16: true
+bm25:
+  mode: syllable
+  k1: 1.2
+  b: 0.75
+  vocab_path: data/cache/bm25_vocab.json
+qdrant:
+  url: http://localhost:6333
+  collection: medical_chunks_v1
+  upsert_batch_size: 256
+  # Server 1.19.2 từ chối 0; 10 là mức nhỏ nhất để HNSW vẫn chạy với dữ liệu mẫu.
+  hnsw: {m: 16, ef_construct: 100, full_scan_threshold: 10}
+  indexing_threshold: 100
+  hnsw_ef: 128
+search:
+  branches: [dense, sparse]
+  prefetch_limit: 100
+  rrf_k: 60
+  top_k: 10
+eval:
+  questions_path: data/eval/questions.jsonl
+  warmup_runs: 10
+  latency_runs: 500
+store: qdrant
+# pgvector và milvus dùng chung upsert_batch_size, hnsw và hnsw_ef của qdrant
+# để ba kho so sánh cùng m, ef_construction và ef.
+pgvector:
+  dsn: postgresql://rag:rag@localhost:5432/rag
+  collection: medical_chunks_v1
+  sparse_dimension: 250002
+milvus:
+  uri: http://localhost:19530
+  collection: medical_chunks_v1
+  sparse_dimension: 250002

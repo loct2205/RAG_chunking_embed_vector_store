@@ -1,0 +1,8 @@
+{"qid": "q01", "question": "Dấu hiệu cảnh báo của sốt xuất huyết là gì?", "answer_keys": ["đau bụng dữ dội"], "kind": "text"}
+{"qid": "q02", "question": "Khi nào không được dùng paracetamol cho trẻ?", "answer_keys": ["suy gan nặng"], "kind": "text"}
+{"qid": "q03", "question": "Bù nước theo ghi chú không chia mục khi nào?", "answer_keys": ["nôn nhiều lần"], "kind": "text"}
+{"qid": "q04", "question": "Hạ sốt thông thường bằng cách nào?", "answer_keys": ["nước ấm"], "kind": "text"}
+{"qid": "q05", "question": "Trẻ 10 kg dùng paracetamol tối đa bao nhiêu mỗi ngày?", "answer_keys": ["10 kg", "600 mg"], "kind": "table"}
+{"qid": "q06", "question": "Trẻ 20 kg dùng paracetamol tối đa bao nhiêu mỗi ngày?", "answer_keys": ["20 kg", "1200 mg"], "kind": "table"}
+{"qid": "q07", "question": "Trẻ 30 kg dùng paracetamol tối đa bao nhiêu mỗi ngày?", "answer_keys": ["30 kg", "1800 mg"], "kind": "table"}
+{"qid": "q08", "question": "Trẻ 40 kg dùng paracetamol tối đa bao nhiêu mỗi ngày?", "answer_keys": ["40 kg", "2400 mg"], "kind": "table"}
