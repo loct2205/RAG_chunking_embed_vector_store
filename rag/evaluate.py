@@ -6,20 +6,30 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import asdict
 from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
+from math import log2
 from pathlib import Path
 
 import numpy as np
 
 from rag.config import AppConfig
 from rag.fusion import rrf
-from rag.schema import EvalQuestion, Hit
+from rag.schema import Chunk, EvalQuestion, Hit
 from rag.search import SearchService
 from rag.text.normalizer import normalize
 
-_TRACKED_PACKAGES = ("qdrant-client", "llama-index-core", "FlagEmbedding", "numpy")
+_TRACKED_PACKAGES = (
+    "qdrant-client",
+    "llama-index-core",
+    "FlagEmbedding",
+    "numpy",
+    "torch",
+    "transformers",
+    "sentence-transformers",
+)
 _TYPE_TO_KIND = {"table": "table", "paraphrase": "text", "entity_number": "text"}
 
 
@@ -41,6 +51,33 @@ def success_at_k(flags_per_question: list[list[bool]], k: int) -> float:
         return 0.0
     hits = sum(1 for flags in flags_per_question if any(flags[:k]))
     return hits / len(flags_per_question)
+
+
+def recall_at_k(ranked_ids: list[str], relevant_ids: set[str], k: int) -> float:
+    """Recall của một query; relevant_ids phải lấy từ toàn bộ corpus."""
+    if k < 1:
+        raise ValueError("k phải dương khi tính Recall@K.")
+    if not relevant_ids:
+        return 0.0
+    return len(set(ranked_ids[:k]) & relevant_ids) / len(relevant_ids)
+
+
+def ndcg_at_k(ranked_ids: list[str], relevant_ids: set[str], k: int) -> float:
+    """nDCG của một query với nhãn nhị phân; chunk lặp không được cộng điểm lại."""
+    if k < 1:
+        raise ValueError("k phải dương khi tính nDCG@K.")
+    if not relevant_ids:
+        return 0.0
+    seen: set[str] = set()
+    dcg = 0.0
+    for rank, chunk_id in enumerate(ranked_ids[:k], start=1):
+        if chunk_id in relevant_ids and chunk_id not in seen:
+            dcg += 1.0 / log2(rank + 1)
+        seen.add(chunk_id)
+    ideal = sum(
+        1.0 / log2(rank + 1) for rank in range(1, min(k, len(relevant_ids)) + 1)
+    )
+    return dcg / ideal
 
 
 def mean_reciprocal_rank(flags_per_question: list[list[bool]]) -> float:
@@ -86,18 +123,35 @@ def load_questions(path: Path) -> list[EvalQuestion]:
 class Evaluator:
     """Chấm một SearchService trên một bộ câu hỏi."""
 
-    def __init__(self, search: SearchService, questions: list[EvalQuestion]) -> None:
+    def __init__(
+        self,
+        search: SearchService,
+        questions: list[EvalQuestion],
+        chunks: list[Chunk] | None = None,
+    ) -> None:
         self._search = search
         self._questions = questions
+        # Không truyền corpus: vẫn trả các metric cũ, không suy mẫu số từ top K.
+        self._corpus = None if chunks is None else {c.chunk_id: c for c in chunks}
+        if self._corpus is not None and len(self._corpus) != len(chunks):
+            raise ValueError("Corpus đánh giá có chunk_id trùng nhau.")
+        self._relevant_ids = (
+            None
+            if chunks is None
+            else [
+                {c.chunk_id for c in chunks if is_relevant(c.content, q.answer_keys)}
+                for q in questions
+            ]
+        )
 
     def score(self, branches: list[str], top_k: int) -> dict[str, float | int]:
-        grouped: dict[str, list[list[bool]]] = {"text": [], "table": []}
-        for question in self._questions:
-            hits = self._search.search(question.question, branches, top_k)
-            grouped[question.kind].append(
-                [is_relevant(hit.content, question.answer_keys) for hit in hits]
-            )
-        return _summarize(grouped, top_k)
+        if top_k < 1:
+            raise ValueError("top_k phải dương.")
+        rankings = [
+            self._search.search(question.question, branches, top_k)
+            for question in self._questions
+        ]
+        return self._score_rankings(rankings, top_k)
 
     def measure_latency(
         self, branches: list[str], top_k: int, warmup: int, runs: int
@@ -109,11 +163,14 @@ class Evaluator:
             self._search.search(question.question, branches, top_k)
         encode_ms: list[float] = []
         query_ms: list[float] = []
+        total_ms: list[float] = []
         for index in range(runs):
             question = self._questions[index % len(self._questions)]
+            started = time.perf_counter()
             timed = self._search.search_timed(
                 question.question, branches, top_k, log_result=False
             )
+            total_ms.append((time.perf_counter() - started) * 1000)
             encode_ms.append(timed.encode_seconds * 1000)
             query_ms.append(timed.query_seconds * 1000)
         return {
@@ -121,23 +178,63 @@ class Evaluator:
             "runs": runs,
             "encode_ms": latency_percentiles(encode_ms),
             "query_ms": latency_percentiles(query_ms),
+            "total_ms": latency_percentiles(total_ms),
         }
 
     def fuse_branches(
         self, branches: list[str], top_k: int, prefetch_limit: int, rrf_k: int
     ) -> dict[str, float | int]:
         """Gộp thứ hạng từng nhánh bằng rrf() ở client, cho kho không gộp sẵn."""
-        grouped: dict[str, list[list[bool]]] = {"text": [], "table": []}
+        if top_k < 1:
+            raise ValueError("top_k phải dương.")
+        fused_rankings: list[list[Hit]] = []
         for question in self._questions:
             rankings = [
                 self._search.search(question.question, [branch], prefetch_limit)
                 for branch in branches
             ]
             fused = _fuse_hits(rankings, rrf_k, top_k)
+            fused_rankings.append(fused)
+        return self._score_rankings(fused_rankings, top_k)
+
+    def _score_rankings(
+        self, rankings: list[list[Hit]], top_k: int
+    ) -> dict[str, float | int]:
+        grouped: dict[str, list[list[bool]]] = {"text": [], "table": []}
+        recalls: dict[str, list[float]] = {"text": [], "table": []}
+        ndcgs: dict[str, list[float]] = {"text": [], "table": []}
+        no_relevant = {"text": 0, "table": 0}
+        for index, (question, hits) in enumerate(
+            zip(self._questions, rankings, strict=True)
+        ):
             grouped[question.kind].append(
-                [is_relevant(hit.content, question.answer_keys) for hit in fused]
+                [is_relevant(hit.content, question.answer_keys) for hit in hits]
             )
-        return _summarize(grouped, top_k)
+            if self._relevant_ids is not None:
+                assert self._corpus is not None
+                for hit in hits:
+                    chunk = self._corpus.get(hit.chunk_id)
+                    if chunk is None or chunk.content != hit.content:
+                        raise ValueError(
+                            f"Chunk '{hit.chunk_id}' không khớp corpus đánh giá. "
+                            "Dùng cache của đúng lần ingest và collection đang tìm."
+                        )
+                relevant = self._relevant_ids[index]
+                ranked_ids = [hit.chunk_id for hit in hits]
+                recalls[question.kind].append(recall_at_k(ranked_ids, relevant, top_k))
+                ndcgs[question.kind].append(ndcg_at_k(ranked_ids, relevant, top_k))
+                no_relevant[question.kind] += int(not relevant)
+        summary = _summarize(grouped, top_k)
+        if self._relevant_ids is not None:
+            for kind in grouped:
+                summary[f"{kind}_retrieval_recall_at_k"] = (
+                    sum(recalls[kind]) / len(recalls[kind]) if recalls[kind] else 0.0
+                )
+                summary[f"{kind}_ndcg_at_k"] = (
+                    sum(ndcgs[kind]) / len(ndcgs[kind]) if ndcgs[kind] else 0.0
+                )
+                summary[f"{kind}_no_relevant_count"] = no_relevant[kind]
+        return summary
 
 
 def write_report(directory: Path, label: str, payload: dict[str, object]) -> Path:
@@ -223,6 +320,10 @@ def _summarize(
         summary[f"{kind}_count"] = len(flags)
         summary[f"{kind}_recall_at_k"] = success_at_k(flags, top_k)
         summary[f"{kind}_mrr"] = mean_reciprocal_rank(flags)
+        summary[f"{kind}_success_at_k"] = summary[f"{kind}_recall_at_k"]
+        summary[f"{kind}_mrr_at_k"] = mean_reciprocal_rank(
+            [row[:top_k] for row in flags]
+        )
     return summary
 
 

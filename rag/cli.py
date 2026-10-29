@@ -20,9 +20,9 @@ from rag.encode.base import Embedder
 from rag.encode.bge_m3 import BgeSettings, load_bge_m3
 from rag.encode.bm25 import Bm25Encoder
 from rag.encode.cache import VectorCache
-from rag.encode.fake import FAKE_MODEL_NAME, FakeEmbedder
+from rag.encode.fake import FakeEmbedder
 from rag.evaluate import Evaluator, load_questions, report_payload, write_report
-from rag.pipeline import IngestParts, IngestPipeline
+from rag.pipeline import IngestParts, IngestPipeline, configure_dense_embedder
 from rag.schema import Hit
 from rag.search import SearchService
 from rag.store.base import VectorStore
@@ -101,7 +101,8 @@ def _dispatch(args: argparse.Namespace) -> int:
     embedder = _embedder(config, args.fake_embedder)
     bm25 = Bm25Encoder(config.bm25.mode, config.bm25.k1, config.bm25.b)
     bm25.load(config.bm25.vocab_path)
-    service = SearchService(embedder, bm25, _store(config), config.search.top_k)
+    store = _store(config)
+    service = SearchService(embedder, bm25, store, config.search.top_k)
     if args.command == "search":
         branches = (
             parse_branch_list(args.branches)
@@ -111,11 +112,14 @@ def _dispatch(args: argparse.Namespace) -> int:
         _print_hits(service.search(args.question, branches))
         return 0
     questions = load_questions(config.eval.questions_path)
-    evaluator = Evaluator(service, questions)
+    cached_model, chunks, _ = VectorCache().load(config.paths.cache_dir)
+    if cached_model != embedder.model_name or len(chunks) != store.count():
+        raise ValueError("Cache đánh giá không khớp model/số chunk của collection.")
+    evaluator = Evaluator(service, questions, chunks)
     groups = parse_eval_configs(args.configs)
     if args.command == "eval":
-        return _eval(config, evaluator, groups, args.fake_embedder)
-    return _compare(config, evaluator, groups, args.fake_embedder)
+        return _eval(config, evaluator, groups, embedder.model_name)
+    return _compare(config, evaluator, groups, embedder.model_name)
 
 
 def _ingest(config: AppConfig, fake: bool, recreate: bool) -> int:
@@ -141,7 +145,7 @@ def _eval(
     config: AppConfig,
     evaluator: Evaluator,
     groups: list[list[str]],
-    fake: bool,
+    model_name: str,
 ) -> int:
     body: dict[str, object] = {}
     for branches in groups:
@@ -155,7 +159,6 @@ def _eval(
         )
         body[label] = {"quality": quality, "latency": latency}
         _print_quality(label, quality, latency)
-    model_name = FAKE_MODEL_NAME if fake else config.embedding.model_name
     payload = report_payload(config, body)
     payload["model_name"] = model_name
     path = write_report(
@@ -169,7 +172,7 @@ def _compare(
     config: AppConfig,
     evaluator: Evaluator,
     groups: list[list[str]],
-    fake: bool,
+    model_name: str,
 ) -> int:
     body: dict[str, object] = {}
     for branches in groups:
@@ -185,9 +188,9 @@ def _compare(
             f"{label} client-rrf  text {fused['text_recall_at_k']:.3f}  "
             f"table {fused['table_recall_at_k']:.3f}"
         )
+        _print_retrieval_quality(fused)
     payload = report_payload(config, body)
-    if fake:
-        payload["model_name"] = FAKE_MODEL_NAME
+    payload["model_name"] = model_name
     path = write_report(
         config.paths.reports_dir,
         "compare_" + ",".join("+".join(group) for group in groups),
@@ -203,7 +206,7 @@ def _embedder(config: AppConfig, fake: bool) -> Embedder:
             "Dùng FakeEmbedder, không nạp BGE-M3. Tokenizer tách theo khoảng trắng."
         )
         return FakeEmbedder()
-    return load_bge_m3(
+    base = load_bge_m3(
         BgeSettings(
             model_name=config.embedding.model_name,
             model_path=config.embedding.model_path,
@@ -212,6 +215,7 @@ def _embedder(config: AppConfig, fake: bool) -> Embedder:
             use_fp16=config.embedding.use_fp16,
         )
     )
+    return configure_dense_embedder(base, config.embedding)
 
 
 def _store(config: AppConfig) -> VectorStore:
@@ -302,6 +306,33 @@ def _print_quality(
     print(
         f"{label}  text {quality['text_recall_at_k']:.3f}  table {quality['table_recall_at_k']:.3f}  "
         f"encode p50 {encode['p50']:.1f} ms  query p50 {query['p50']:.1f} ms"
+    )
+    _print_retrieval_quality(quality)
+    k = quality["top_k"]
+    print(
+        f"  Success@{k}: text {quality['text_success_at_k']:.3f}  "
+        f"table {quality['table_success_at_k']:.3f}; "
+        f"MRR@{k}: text {quality['text_mrr_at_k']:.3f}  "
+        f"table {quality['table_mrr_at_k']:.3f}"
+    )
+    for stage in ("encode_ms", "query_ms", "total_ms"):
+        stats = latency[stage]
+        assert isinstance(stats, dict)
+        print(
+            f"  {stage}: p50 {stats['p50']:.1f}, "
+            f"p95 {stats['p95']:.1f}, p99 {stats['p99']:.1f}"
+        )
+
+
+def _print_retrieval_quality(quality: dict[str, float | int]) -> None:
+    if "text_retrieval_recall_at_k" not in quality:
+        return
+    k = quality["top_k"]
+    print(
+        f"  Recall@{k}: text {quality['text_retrieval_recall_at_k']:.3f}  "
+        f"table {quality['table_retrieval_recall_at_k']:.3f}; "
+        f"nDCG@{k}: text {quality['text_ndcg_at_k']:.3f}  "
+        f"table {quality['table_ndcg_at_k']:.3f}"
     )
 
 

@@ -9,7 +9,7 @@ from rag.schema import SparseVec
 
 
 class Embedder(ABC):
-    """Dense và sparse của cùng một model. BM25 là encoder riêng."""
+    """Dense và sparse, có thể ghép từ hai model. BM25 là encoder riêng."""
 
     @property
     @abstractmethod
@@ -27,4 +27,8 @@ class Embedder(ABC):
 
     @abstractmethod
     def encode(self, texts: list[str]) -> list[tuple[list[float], SparseVec]]:
-        """Encode một batch. Câu hỏi và tài liệu dùng cùng hàm này."""
+        """Encode một batch tài liệu."""
+
+    def encode_queries(self, texts: list[str]) -> list[tuple[list[float], SparseVec]]:
+        """Mặc định giống tài liệu; model bất đối xứng có thể override."""
+        return self.encode(texts)

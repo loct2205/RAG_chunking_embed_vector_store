@@ -31,6 +31,10 @@ class EmbeddingConfig:
     max_length: int
     batch_size: int
     use_fp16: bool
+    dense_model: str = "bge-m3"
+    e5_model_path: Path = Path("models/multilingual-e5-base")
+    e5_max_length: int = 512
+    e5_batch_size: int = 16
 
 
 @dataclass(frozen=True)
@@ -151,12 +155,27 @@ def _chunking(section: dict[str, Any]) -> ChunkingConfig:
 
 
 def _embedding(section: dict[str, Any]) -> EmbeddingConfig:
+    dense_model = str(section.get("dense_model", "bge-m3"))
+    if dense_model not in ("bge-m3", "e5-base"):
+        raise ValueError("embedding.dense_model phải là bge-m3 hoặc e5-base.")
+    e5 = {
+        "e5_model_path": section.get("e5_model_path", "models/multilingual-e5-base"),
+        "e5_max_length": section.get("e5_max_length", 512),
+        "e5_batch_size": section.get("e5_batch_size", section.get("batch_size", 16)),
+    }
+    e5_max_length = _positive_int(e5, "e5_max_length")
+    if e5_max_length > 512:
+        raise ValueError("embedding.e5_max_length không được vượt quá 512 token.")
     return EmbeddingConfig(
         model_name=str(_require(section, "model_name")),
         model_path=_as_path(section, "model_path"),
         max_length=_positive_int(section, "max_length"),
         batch_size=_positive_int(section, "batch_size"),
         use_fp16=bool(_require(section, "use_fp16")),
+        dense_model=dense_model,
+        e5_model_path=_as_path(e5, "e5_model_path"),
+        e5_max_length=e5_max_length,
+        e5_batch_size=_positive_int(e5, "e5_batch_size"),
     )
 
 

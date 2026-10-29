@@ -6,6 +6,8 @@ chunking:
   chunk_size: 512
   chunk_overlap: 64
 embedding:
+  # e5-base selects intfloat/multilingual-e5-base; use its separate config/cache.
+  dense_model: bge-m3
   model_name: BAAI/bge-m3
   model_path: models/bge-m3
   max_length: 1024

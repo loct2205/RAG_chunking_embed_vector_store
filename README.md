@@ -108,17 +108,24 @@ python -m rag.cli eval --config config.corpus.yaml --configs dense,sparse,bm25,d
 
 Một câu được tính là đúng khi có ít nhất một chunk trong top k chứa mọi cụm của `answer_keys`. Đây là success@k trên từng câu, ghi trong báo cáo dưới tên `text_recall_at_k` và `table_recall_at_k`. Câu bảng cần cả cụm nằm trong cùng một chunk.
 
-Màn hình chỉ in recall và P50. File `reports/<thời điểm>_<cấu hình>.json` thêm:
+Giữ nguyên tên và cách tính các metric cũ. K lấy từ `search.top_k`, mặc định **10** trong cả hai file cấu hình. Màn hình in thêm Recall@K và nDCG@K bên cạnh kết quả cũ và P50. File `reports/<thời điểm>_<cấu hình>.json` thêm:
 
 | Khóa | Ý nghĩa |
 | --- | --- |
 | `text_count`, `table_count` | Số câu mỗi loại |
+| `text_retrieval_recall_at_k`, `table_retrieval_recall_at_k` | Recall@K: số chunk phù hợp khác nhau trong top K / tổng số chunk phù hợp trong corpus, trung bình theo câu hỏi |
+| `text_ndcg_at_k`, `table_ndcg_at_k` | nDCG@K với nhãn nhị phân: tổng điểm phù hợp giảm theo `1/log2(rank+1)`, chia cho điểm của thứ hạng lý tưởng tại cùng K, trung bình theo câu hỏi |
+| `text_no_relevant_count`, `table_no_relevant_count` | Số câu không có chunk nào phù hợp trong corpus; các câu này nhận 0 cho hai metric mới |
 | `text_mrr`, `table_mrr` | Trung bình 1/hạng của chunk đúng đầu tiên. Không có chunk đúng thì hạng đó là 0 |
 | `encode_ms`, `query_ms` | P50, P95, P99 |
 | `warmup_runs`, `runs` | Số lượt bỏ đi và số lượt được tính |
 | `model_name`, `library_versions`, `config`, `created_at` | Model, phiên bản thư viện, toàn bộ tham số và thời điểm chạy |
 
 `compare` ghi `client_rrf` với cùng các khóa chất lượng, không đo độ trễ. Mỗi nhóm nhánh được tìm riêng với `prefetch_limit`, rồi gộp bằng `rrf_k` và cắt còn `top_k`.
+
+Hai metric mới dò `answer_keys` trên **toàn bộ chunk đã ingest trong cache** để xác định tập chunk phù hợp, theo cùng quy tắc chứa đủ cụm chữ của metric cũ. Vì vậy đây là đánh giá relevance nhị phân dựa vào từ khóa, chưa phải nhãn do người đánh giá. Chunk lặp trong kết quả không được cộng điểm lần nữa. Ví dụ corpus có 3 chunk phù hợp nhưng top K chỉ tìm được 1: Success@K là 1, Recall@K là 1/3. nDCG còn xét vị trí các chunk phù hợp.
+
+CLI và notebook truyền corpus từ cache vào `Evaluator(service, questions, chunks)`. Dùng cache của đúng collection đang chấm; CLI kiểm tra model và số chunk, evaluator kiểm tra ID/nội dung kết quả với corpus. Khi gọi API cũ `Evaluator(service, questions)` không có corpus, chỉ các metric cũ được trả về, không suy mẫu số Recall từ top K. Notebook giữ riêng corpus cho từng lần ingest để chấm dữ liệu mẫu và dữ liệu đầy đủ.
 
 Đo độ trễ bằng `time.perf_counter` bên trong `SearchService`: một đồng hồ cho encode, một đồng hồ cho truy vấn. `warmup_runs` lượt đầu bị bỏ. `latency_runs` lượt sau xoay vòng bộ câu hỏi. Mặc định 10 và 500. Trên CPU với BGE-M3, hạ `eval.latency_runs` khi chỉ cần xem điểm.
 
@@ -258,3 +265,86 @@ Mở `notebooks/colab_demo.ipynb`. Nén cả thư mục repo thành `RAG.zip`, g
 Upload notebook, upload `RAG.zip` vào `/content`, chọn Runtime → T4 GPU, chạy từ ô đầu. Notebook tải `BAAI/bge-m3`, tự cài Postgres với pgvector, mở Milvus Lite, và so với Qdrant trong bộ nhớ. Lần đầu tải model khoảng 2 GB, cài Postgres khoảng 2 phút.
 
 Một kho lỗi thì ô in dòng lỗi của kho đó và chạy tiếp các kho còn lại. Milvus Lite đi kèm `pymilvus==2.5.18` có thể từ chối collection có cả vector dense và hai vector sparse. Bản Milvus đầy đủ trên máy có Docker là `docker compose up -d etcd minio milvus`.
+
+## Chọn dense BGE-M3 hoặc multilingual E5
+
+Mặc định vẫn dùng BGE-M3 cho cả dense và sparse. Để thử E5, thêm các khóa sau
+vào nhóm `embedding` trong YAML đang dùng, giữ các tham số BGE-M3 hiện có:
+
+```yaml
+embedding:
+  dense_model: e5-base
+  e5_model_path: models/multilingual-e5-base
+  e5_max_length: 512
+  e5_batch_size: 16
+```
+
+Tải `intfloat/multilingual-e5-base` vào `e5_model_path` trước khi chạy.
+Chọn `paths.cache_dir`, `bm25.vocab_path` và collection của kho đang dùng riêng
+cho thử nghiệm E5. `config.corpus.e5.yaml` đã đặt các đường dẫn riêng cho 20 paper.
+Đổi `dense_model` về `bge-m3` để trở lại baseline; `--fake-embedder` bỏ qua E5.
+
+Lớp `DenseOverrideEmbedder` trong `pipeline.py` thay dense bằng E5 (768 chiều),
+giữ sparse và tokenizer cắt chunk của BGE-M3. BGE vẫn tính dense rồi bỏ qua.
+Batch ngoài theo `embedding.batch_size`; E5 chia tiếp theo `e5_batch_size`.
+E5 thêm `passage: ` và truncate theo `e5_max_length` (tối đa 512 token, gồm
+prefix, header và special tokens); cần tính giới hạn này khi chọn kích thước chunk.
+
+Lựa chọn này áp dụng cho `ingest`, `search`, `eval` và `compare`. Dense query E5
+dùng `encode_queries()` với prefix `query: `, sparse query vẫn dùng BGE-M3.
+Tên model trong collection và báo cáo ghi cả hai encoder. Tokenizer cắt chunk
+vẫn là BGE-M3 để hai lựa chọn dùng cùng các chunk và ground truth.
+
+```bash
+python -c "from huggingface_hub import snapshot_download; snapshot_download('intfloat/multilingual-e5-base', local_dir='models/multilingual-e5-base')"
+python -m rag.cli ingest --config config.corpus.e5.yaml
+python -m rag.cli search "câu hỏi thử" --config config.corpus.e5.yaml --branches dense,sparse
+python -m scripts.score_ground_truth --config config.corpus.e5.yaml --configs dense,sparse,bm25,dense+sparse
+```
+
+`config.corpus.e5.yaml` dùng ground truth dạng JSON bên dưới. Muốn dùng lệnh
+`rag.cli eval` chấm theo cụm chữ như trước, đặt `eval.questions_path` thành
+`data/eval/testset.jsonl` trong một bản sao config đó. Luôn dùng cùng dense model
+cho tài liệu và câu hỏi; đổi model cần ingest vào collection/cache riêng.
+
+## Đánh giá bằng ground_truth có nhãn chunk
+
+`extra/ground_truth.json` có 30 câu (18 text, 12 table), gồm 20 câu một tài liệu
+và 10 câu nhiều tài liệu. Nhãn gắn với snapshot 432 chunk trong `extra/chunks.json`.
+Đây là nhãn do assistant rà soát, chưa phải bộ nhãn được chuyên gia đánh giá độc lập.
+Script kiểm tra SHA-256 của toàn bộ chunk và từ chối chấm khi snapshot khác.
+Không thay nhãn bằng kết quả truy xuất hay dò `reference_answer` trong chunk.
+
+```bash
+python -m rag.cli ingest --config config.corpus.ground-truth.yaml
+python -m scripts.score_ground_truth --config config.corpus.ground-truth.yaml --configs dense,sparse,bm25,dense+sparse
+```
+
+Config này dùng BGE-M3 thật, batch 2 cho máy ít RAM, 3 lượt warmup và 30 lượt đo
+độ trễ mỗi nhánh. Toàn bộ 30 câu đều được chấm tại K=1, 5 và `search.top_k`
+(mặc định 10). Có thể tăng `eval.latency_runs` lên 500 để đo độ trễ ổn định hơn;
+p95/p99 từ 30 mẫu chỉ mang tính tham khảo.
+
+| Metric | Cách tính |
+| --- | --- |
+| `success_at_k` | Tỷ lệ câu có ít nhất một chunk được gán nhãn relevant trong top K |
+| `mrr_at_k` | Trung bình nghịch đảo hạng chunk relevant đầu tiên; không có trong top K thì bằng 0 |
+| `recall_at_k` | Số chunk relevant khác nhau lấy được / tổng số chunk relevant được gán nhãn, trung bình theo câu |
+| `ndcg_at_k` | nDCG nhị phân, có chiết khấu theo hạng, không cộng điểm chunk lặp |
+| `evidence_coverage_at_k` | Trung bình tỷ lệ nhóm bằng chứng bắt buộc đã lấy được |
+| `all_evidence_success_at_k` | Tỷ lệ câu lấy được ít nhất một chunk của **mọi** nhóm bằng chứng bắt buộc |
+
+JSON trong `reports/` chứa kết quả tổng, theo text/table, theo câu một/nhiều tài liệu
+và từng câu với danh sách chunk truy xuất. `latency.encode_ms`, `query_ms`, `total_ms`
+đều có p50, p95, p99 (mili giây), bỏ các lượt warmup. `total_ms` đo thời gian thực
+của một lần `search_timed`, gồm chuẩn hóa, encode và truy vấn; không cộng các phân vị
+của encode/query. Đo tuần tự, không phải benchmark tải đồng thời hay throughput.
+
+Lệnh `rag.cli eval` cũ cũng ghi thêm `text_success_at_k`, `table_success_at_k`,
+`text_mrr_at_k`, `table_mrr_at_k` và `latency.total_ms`; vẫn giữ các khóa cũ.
+
+Để kiểm tra spec khi cần tạo lại nhãn, ghi ra một file mới:
+
+```bash
+python -m scripts.build_ground_truth --chunks extra/chunks.json --spec extra/ground_truth_spec.json --output reports/ground_truth_rebuilt.json
+```

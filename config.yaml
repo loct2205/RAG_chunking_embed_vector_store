@@ -6,6 +6,11 @@ chunking:
   chunk_size: 512
   chunk_overlap: 64
 embedding:
+  # Áp dụng cho ingest/search/eval. e5-base thay dense; sparse vẫn từ BGE-M3.
+  dense_model: bge-m3
+  # e5_model_path: models/multilingual-e5-base
+  # e5_max_length: 512
+  # e5_batch_size: 16
   model_name: BAAI/bge-m3
   model_path: models/bge-m3
   max_length: 1024

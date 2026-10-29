@@ -82,7 +82,7 @@ class SearchService:
         sparse = SparseVec(indices=[], values=[])
         bm25 = SparseVec(indices=[], values=[])
         if "dense" in branches or "sparse" in branches:
-            dense, sparse = self._embedder.encode([question])[0]
+            dense, sparse = self._embedder.encode_queries([question])[0]
         if "bm25" in branches:
             bm25 = self._bm25.encode_query(question)
         return Vectors(dense=dense, sparse=sparse, bm25=bm25)
